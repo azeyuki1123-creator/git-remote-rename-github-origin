@@ -45,7 +45,7 @@ export function mailVars(member) {
     stamps: String(stamps.progress),
     stamps_total: String(stamps.earned),
     stamps_left: String(stamps.remaining),
-    discount: `${stamps.discountAmount.toLocaleString('ja-JP')} 円`,
+    discount: stamps.discountEnabled ? `${stamps.discountAmount.toLocaleString('ja-JP')} 円` : 'なし',
   };
 }
 

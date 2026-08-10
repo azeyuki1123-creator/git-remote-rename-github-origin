@@ -248,8 +248,29 @@ describe('スタンプカード', () => {
     assert.equal(summary.progress, branch.stamps_per_card);
   });
 
-  test('2 枚目以降の台紙で割引が段階的に増える', () => {
+  test('割引は既定でオフ（審査料は現金徴収の運用）', async () => {
+    for (const branch of all('SELECT * FROM branches')) {
+      assert.equal(branch.discount_enabled, 0, `${branch.name}は割引オフで始まること`);
+    }
     const branch = get('SELECT * FROM branches ORDER BY is_main DESC LIMIT 1');
+    const member = freshMember(branch.id);
+    const admin = get("SELECT id FROM users WHERE role = 'admin' LIMIT 1");
+    for (let i = 0; i < branch.stamps_per_card * 3; i += 1) {
+      grantStamp({ memberId: member.id, grantedBy: admin.id, grantedOn: '2024-01-01' });
+    }
+    const summary = stampSummary(member);
+    assert.equal(summary.completedCards, 3, '台紙の枚数自体は数えていること');
+    assert.equal(summary.discountAmount, 0, '割引は発生しないこと');
+
+    // 生徒にも指導者にも割引の表示が出ない
+    const cookie = await loginAs('sensei@dojo.test');
+    const stampsPage = await (await req('/stamps', cookie)).text();
+    assert.ok(!stampsPage.includes('割引の状況'), '割引の一覧が出ないこと');
+  });
+
+  test('割引をオンにすると 2 枚目以降で段階的に増える', () => {
+    const branch = get('SELECT * FROM branches ORDER BY is_main DESC LIMIT 1');
+    run('UPDATE branches SET discount_enabled = 1 WHERE id = ?', [branch.id]);
     const member = freshMember(branch.id);
     const admin = get("SELECT id FROM users WHERE role = 'admin' LIMIT 1");
     const per = branch.stamps_per_card;
@@ -273,6 +294,9 @@ describe('スタンプカード', () => {
     summary = stampMany(per); // 3 枚目 = 割引 2 段階
     assert.equal(summary.discountCards, 2);
     assert.equal(summary.discountAmount, branch.discount_per_card * 2);
+
+    run('UPDATE branches SET discount_enabled = 0 WHERE id = ?', [branch.id]);
+    assert.equal(stampSummary(get('SELECT * FROM members WHERE id = ?', [member.id])).discountAmount, 0);
   });
 
   test('取り消したスタンプは数に入らず、誰が取り消したか残る', () => {
@@ -416,6 +440,52 @@ describe('LINE 連携', () => {
       body,
     });
     assert.equal(good.status, 200);
+  });
+
+  test('支部設定を切り替えるだけで、その支部の連絡が LINE 優先に変わる', async () => {
+    const cookie = await loginAs('sensei@dojo.test');
+    const branch = nanseiBranch();
+    const member = get('SELECT * FROM members WHERE branch_id = ? LIMIT 1', [branch.id]);
+
+    // 提携先の準備前：LINE ID を持っていてもメール
+    run("UPDATE members SET line_user_id = 'U-nansei' WHERE id = ?", [member.id]);
+    assert.equal(resolveChannel(get('SELECT * FROM members WHERE id = ?', [member.id])).channel, 'email');
+
+    // 連携できるようになったら、支部設定を「使う」にするだけで切り替わる
+    await post(`/branches/${branch.id}`, cookie, {
+      name: branch.name,
+      stamps_per_card: String(branch.stamps_per_card),
+      exam_rule: branch.exam_rule,
+      reset_on_promotion: String(branch.reset_on_promotion),
+      line_enabled: '1',
+      line_token: 'NANSEI-TOKEN',
+      line_secret: 'NANSEI-SECRET',
+      discount_enabled: '0',
+      discount_per_card: String(branch.discount_per_card),
+      discount_max_cards: String(branch.discount_max_cards),
+    });
+    assert.equal(branchById(branch.id).line_enabled, 1);
+    assert.equal(resolveChannel(get('SELECT * FROM members WHERE id = ?', [member.id])).channel, 'line');
+
+    // 同じ支部でも未連携の生徒はメールのまま
+    const notLinked = get("SELECT * FROM members WHERE branch_id = ? AND line_user_id = '' AND email <> '' LIMIT 1", [
+      branch.id,
+    ]);
+    assert.equal(resolveChannel(notLinked).channel, 'email');
+
+    // 元に戻す
+    await post(`/branches/${branch.id}`, cookie, {
+      name: branch.name,
+      stamps_per_card: String(branch.stamps_per_card),
+      exam_rule: branch.exam_rule,
+      reset_on_promotion: String(branch.reset_on_promotion),
+      line_enabled: '0',
+      discount_enabled: '0',
+      discount_per_card: String(branch.discount_per_card),
+      discount_max_cards: String(branch.discount_max_cards),
+    });
+    run("UPDATE members SET line_user_id = '' WHERE id = ?", [member.id]);
+    assert.equal(resolveChannel(get('SELECT * FROM members WHERE id = ?', [member.id])).channel, 'email');
   });
 
   test('配信は生徒ごとに LINE とメールへ振り分けられる', async () => {

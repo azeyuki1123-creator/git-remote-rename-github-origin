@@ -85,10 +85,11 @@ const SKILLS = {
   ],
 };
 
-// 名西支部は LINE 公式アカウントを持てないため、連絡はメールのみになる設定。
+// 割引は既定でオフ（審査料は現金徴収の運用）。名西支部は提携先の都合で LINE 連携なし。
+// [名称, 本部か, 台紙のスタンプ数, 割引を使うか, 割引額, 割引上限, 審査ルール, 昇級後リセット, LINE, メモ]
 const BRANCHES = [
-  ['本部', 1, 30, 500, 6, 'stamp', 1, 1, 'スタンプ 30 個で審査。2 枚目以降は 1 枚ごとに月謝 500 円引き。'],
-  ['名西支部', 0, 30, 500, 6, 'stamp', 1, 0, 'LINE 連携なし。連絡はメールのみ。'],
+  ['本部', 1, 30, 0, 500, 6, 'stamp', 1, 0, 'スタンプ 30 個で審査。割引は使用しない（審査料は現金徴収）。'],
+  ['名西支部', 0, 30, 0, 500, 6, 'stamp', 1, 0, '提携先の都合で LINE 連携なし。連絡はメールのみ。'],
 ];
 
 const MEMBERS = [
@@ -160,12 +161,12 @@ function clear() {
 
 function seedAll() {
   // 支部
-  for (const [name, isMain, perCard, discount, maxCards, rule, reset, line, note] of BRANCHES) {
+  for (const [name, isMain, perCard, discountOn, discount, maxCards, rule, reset, line, note] of BRANCHES) {
     run(
-      `INSERT INTO branches (name, is_main, stamps_per_card, discount_per_card, discount_max_cards,
-                             exam_rule, reset_on_promotion, line_enabled, note)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [name, isMain, perCard, discount, maxCards, rule, reset, line, note],
+      `INSERT INTO branches (name, is_main, stamps_per_card, discount_enabled, discount_per_card,
+                             discount_max_cards, exam_rule, reset_on_promotion, line_enabled, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [name, isMain, perCard, discountOn, discount, maxCards, rule, reset, line, note],
     );
   }
   const branchByName = new Map(all('SELECT * FROM branches').map((b) => [b.name, b]));

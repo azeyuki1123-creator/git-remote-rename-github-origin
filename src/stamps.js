@@ -41,8 +41,12 @@ export function stampSummary(member) {
   const examEligible = examStamps >= perCard;
 
   const completedCards = Math.floor(earned / perCard);
+  // 割引は支部設定でオンにしたときだけ計算する（既定はオフ）。
   // 1 枚目は審査の受験資格。2 枚目以降が 1 枚ごとに割引 1 段階。
-  const discountCards = Math.min(Math.max(0, completedCards - 1), branch?.discount_max_cards ?? 6);
+  const discountEnabled = Boolean(branch?.discount_enabled);
+  const discountCards = discountEnabled
+    ? Math.min(Math.max(0, completedCards - 1), branch?.discount_max_cards ?? 6)
+    : 0;
   const discountAmount = discountCards * (branch?.discount_per_card ?? 0);
 
   return {
@@ -53,6 +57,7 @@ export function stampSummary(member) {
     examStamps,
     examEligible,
     completedCards,
+    discountEnabled,
     discountCards,
     discountAmount,
     // 現在の台紙の進み具合（審査用の台紙は 1 枚たまったらそこで止まる）

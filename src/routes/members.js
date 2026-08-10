@@ -54,6 +54,7 @@ function indexPage(ctx) {
   const branchId = ctx.query.get('branch') ?? '';
   const keyword = ctx.query.get('q') ?? '';
   const rows = listMembers({ status, beltId, branchId, keyword });
+  const showDiscount = branchList.some((b) => b.discount_enabled);
 
   const body = `
   <h1>生徒名簿</h1>
@@ -71,7 +72,9 @@ function indexPage(ctx) {
 
   <div class="card">
     <div class="table-wrap"><table>
-      <tr><th>氏名</th><th>支部</th><th>帯</th><th>在籍</th><th>スタンプ</th><th>割引</th><th>審査</th><th></th></tr>
+      <tr><th>氏名</th><th>支部</th><th>帯</th><th>在籍</th><th>スタンプ</th>${
+        showDiscount ? '<th>割引</th>' : ''
+      }<th>審査</th><th></th></tr>
       ${
         rows.length
           ? rows
@@ -86,7 +89,7 @@ function indexPage(ctx) {
         <td><span class="badge">${esc(STATUS_LABEL[m.status] || m.status)}</span></td>
         <td class="nowrap">${r.stamps.progress} / ${r.stamps.perCard}<br>
           <span class="muted" style="font-size:.8rem">累計 ${r.stamps.earned}</span></td>
-        <td class="nowrap">${r.stamps.discountCards ? yen(r.stamps.discountAmount) : '—'}</td>
+        ${showDiscount ? `<td class="nowrap">${r.stamps.discountCards ? yen(r.stamps.discountAmount) : '—'}</td>` : ''}
         <td style="min-width:120px">${
           r.ready ? '<span class="badge ok">対象</span>' : bar(r.progress)
         }</td>
@@ -94,7 +97,7 @@ function indexPage(ctx) {
       </tr>`;
               })
               .join('')
-          : '<tr><td colspan="8" class="muted">該当する生徒がいません。</td></tr>'
+          : `<tr><td colspan="${showDiscount ? 8 : 7}" class="muted">該当する生徒がいません。</td></tr>`
       }
     </table></div>
   </div>
@@ -137,7 +140,11 @@ function detailPage(ctx) {
   <h1>${esc(member.name)} <span class="muted" style="font-size:1rem">${esc(member.kana)}</span></h1>
   <p class="sub">${beltTag(member.belt_name, member.belt_color)} ／ ${esc(member.branch_name || '支部未設定')}
     ／ 入会 ${esc(member.joined_on)} ／ ${esc(STATUS_LABEL[member.status] || member.status)}
-    ${readiness.stamps.discountCards ? ` ／ 月謝割引 ${yen(readiness.stamps.discountAmount)}` : ''}</p>
+    ${
+      readiness.stamps.discountEnabled && readiness.stamps.discountCards
+        ? ` ／ 月謝割引 ${yen(readiness.stamps.discountAmount)}`
+        : ''
+    }</p>
 
   <div class="grid cols-4">
     ${stat(`${readiness.stamps.progress} / ${readiness.stamps.perCard}`, 'スタンプ（現在の台紙）')}

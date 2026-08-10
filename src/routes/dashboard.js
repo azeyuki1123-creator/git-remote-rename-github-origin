@@ -169,7 +169,11 @@ function memberDashboard(ctx) {
     ${stat(`${stamps.progress} / ${stamps.perCard}`, 'スタンプ（現在の台紙）')}
     ${stat(stamps.earned, '累計スタンプ')}
     ${stat(`${unlocked} / ${contents.length}`, '解放したコンテンツ')}
-    ${stat(stamps.discountCards ? yen(stamps.discountAmount) : 'なし', '月謝の割引')}
+    ${
+      stamps.discountEnabled
+        ? stat(stamps.discountCards ? yen(stamps.discountAmount) : 'なし', '月謝の割引')
+        : stat(readiness.ready ? '対象' : '準備中', '次回審査')
+    }
   </div>
 
   <div class="card">
@@ -182,9 +186,15 @@ function memberDashboard(ctx) {
           : `審査を受けられるまであと <strong>${stamps.remaining}</strong> 個です。`
       }
       ${
-        stamps.discountCards
-          ? `<br>台紙 ${stamps.completedCards} 枚達成 → 月謝が <strong>${yen(stamps.discountAmount)}</strong> 割引になっています。`
-          : `<br>台紙が 2 枚目以降そろうと、1 枚ごとに月謝が ${yen(stamps.branch?.discount_per_card ?? 0)} 割引になります。`
+        !stamps.discountEnabled
+          ? ''
+          : stamps.discountCards
+            ? `<br>台紙 ${stamps.completedCards} 枚達成 → 月謝が <strong>${yen(
+                stamps.discountAmount,
+              )}</strong> 割引になっています。`
+            : `<br>台紙が 2 枚目以降そろうと、1 枚ごとに月謝が ${yen(
+                stamps.branch?.discount_per_card ?? 0,
+              )} 割引になります。`
       }
     </p>
     <p class="muted" style="font-size:.85rem;margin-bottom:0">

@@ -244,6 +244,8 @@ CREATE INDEX IF NOT EXISTS idx_mail_status ON mail_messages(status);
 
 // 既存の DB にも後から列を足せるようにする
 const ADDED_COLUMNS = [
+  // 割引は既定でオフ（審査料を現金徴収する運用では使わないため）
+  ['branches', 'discount_enabled', 'INTEGER NOT NULL DEFAULT 0'],
   ['members', 'branch_id', 'INTEGER REFERENCES branches(id)'],
   ['members', 'line_user_id', "TEXT NOT NULL DEFAULT ''"],
   ['members', 'line_link_code', "TEXT NOT NULL DEFAULT ''"],

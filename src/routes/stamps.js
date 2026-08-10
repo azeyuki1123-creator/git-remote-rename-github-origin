@@ -17,6 +17,11 @@ function indexPage(ctx) {
   const eligible = rows.filter((r) => r.summary.examEligible).length;
   const discounted = rows.filter((r) => r.summary.discountCards > 0);
   const totalDiscount = discounted.reduce((sum, r) => sum + r.summary.discountAmount, 0);
+  // 割引を使う支部が 1 つも無ければ、割引まわりの表示は出さない
+  const showDiscount = branchList.some((b) => b.discount_enabled);
+  const stampedToday = get(
+    "SELECT COUNT(*) AS c FROM stamps WHERE status = 'active' AND granted_on = date('now')",
+  ).c;
 
   // 直近の稽古（未押印のものを先に出す）
   const sessions = all(
@@ -49,8 +54,8 @@ function indexPage(ctx) {
   <div class="grid cols-4">
     ${stat(rows.length, '対象の生徒')}
     ${stat(eligible, '審査を受けられる生徒')}
-    ${stat(discounted.length, '割引対象の生徒')}
-    ${stat(yen(totalDiscount), '今月の割引合計')}
+    ${stat(stampedToday, '今日押したスタンプ')}
+    ${showDiscount ? stat(yen(totalDiscount), '割引合計') : stat(rows.reduce((s, r) => s + r.summary.earned, 0), '累計スタンプ')}
   </div>
 
   <div class="card">
@@ -106,7 +111,9 @@ function indexPage(ctx) {
             summary.examEligible ? ' <span class="badge ok">審査可</span>' : ''
           }</td>
           <td class="nowrap">${summary.earned} 個${
-            summary.discountCards ? ` <span class="badge warn">割引 ${yen(summary.discountAmount)}</span>` : ''
+            showDiscount && summary.discountCards
+              ? ` <span class="badge warn">割引 ${yen(summary.discountAmount)}</span>`
+              : ''
           }</td>
         </tr>`,
           )
@@ -116,7 +123,10 @@ function indexPage(ctx) {
     </form>
   </div>
 
-  <div class="card">
+  ${
+    !showDiscount
+      ? ''
+      : `<div class="card">
     <h2 style="margin-top:0">割引の状況</h2>
     ${
       discounted.length
@@ -139,7 +149,8 @@ function indexPage(ctx) {
         </p>`
         : '<p class="muted">まだ割引対象の生徒はいません。</p>'
     }
-  </div>
+  </div>`
+  }
 
   <div class="card">
     <h2 style="margin-top:0">押印ログ（監査用）</h2>
@@ -187,7 +198,11 @@ export function memberStampSection(member) {
           ? '<span class="badge ok">審査を受けられます</span>'
           : `<span class="badge warn">審査まであと ${summary.remaining} 個</span>`
       }
-      ${summary.discountCards ? `<span class="badge">割引 ${yen(summary.discountAmount)}</span>` : ''}
+      ${
+        summary.discountEnabled && summary.discountCards
+          ? `<span class="badge">割引 ${yen(summary.discountAmount)}</span>`
+          : ''
+      }
     </div>
     ${stampCard(summary)}
     <form method="post" action="/stamps/grant" class="row" style="margin-top:.5rem">
@@ -228,20 +243,35 @@ function settingsPage(ctx) {
   const branchList = branches();
   const body = `
   <h1>支部設定</h1>
-  <p class="sub">スタンプの必要数・割引額・審査ルール・LINE 連携の可否は支部ごとに設定できます。</p>
+  <p class="sub">スタンプの必要数・審査ルール・LINE 連携の可否は支部ごとに設定できます。</p>
 
   ${branchList
-    .map(
-      (b) => `<div class="card">
+    .map((b) => {
+      const memberCount = get("SELECT COUNT(*) AS c FROM members WHERE branch_id = ? AND status = 'active'", [b.id]).c;
+      const linked = get(
+        "SELECT COUNT(*) AS c FROM members WHERE branch_id = ? AND status = 'active' AND line_user_id <> ''",
+        [b.id],
+      ).c;
+      const lineReady = b.line_enabled && b.line_token && b.line_secret;
+
+      return `<div class="card">
     <h2 style="margin-top:0">${esc(b.name)} ${b.is_main ? '<span class="badge">本部</span>' : ''}</h2>
+    <p class="sub" style="margin-bottom:.8rem">
+      在籍 ${memberCount} 名 ／ 連絡手段：
+      ${
+        b.line_enabled
+          ? lineReady
+            ? `<strong>LINE + メール</strong>（LINE 連携済み ${linked} 名、残り ${
+                memberCount - linked
+              } 名はメール）`
+            : '<span class="badge warn">LINE を「使う」にしていますが、トークン／シークレットが未入力です</span>'
+          : '<strong>メールのみ</strong>'
+      }
+    </p>
     <form method="post" action="/branches/${b.id}">
       <div class="row">
         ${field('支部名', textInput('name', b.name, { required: true }))}
         ${field('台紙 1 枚のスタンプ数', textInput('stamps_per_card', b.stamps_per_card, { type: 'number' }))}
-        ${field('台紙 1 枚あたりの割引額（円）', textInput('discount_per_card', b.discount_per_card, { type: 'number' }))}
-        ${field('割引段階の上限', textInput('discount_max_cards', b.discount_max_cards, { type: 'number' }))}
-      </div>
-      <div class="row" style="margin-top:.75rem">
         ${field(
           '審査の判定ルール',
           selectBox(
@@ -258,19 +288,39 @@ function settingsPage(ctx) {
           '昇級後のスタンプ',
           selectBox('reset_on_promotion', [[1, '数え直す（次の審査用にリセット）'], [0, '通算のまま']], b.reset_on_promotion),
         )}
-        ${field('LINE 連携', selectBox('line_enabled', [[0, '使わない'], [1, '使う']], b.line_enabled))}
       </div>
-      <div class="row" style="margin-top:.75rem">
-        ${field('LINE チャネルアクセストークン', textInput('line_token', b.line_token, { type: 'password' }))}
-        ${field('LINE チャネルシークレット', textInput('line_secret', b.line_secret, { type: 'password' }))}
+
+      <div class="divider"></div>
+      <h3 style="font-size:.95rem;margin:.2rem 0 .6rem">LINE 連携</h3>
+      <p class="muted" style="font-size:.85rem;margin-top:0">
+        「使う」に切り替えるだけで、この支部の連絡が LINE 優先に変わります（未連携の生徒はメールのまま）。
+        提携先の準備ができてから切り替えてください。
+      </p>
+      <div class="row">
+        ${field('この支部で LINE を', selectBox('line_enabled', [[0, '使わない（メールのみ）'], [1, '使う']], b.line_enabled))}
+        ${field('チャネルアクセストークン', textInput('line_token', b.line_token, { type: 'password' }))}
+        ${field('チャネルシークレット', textInput('line_secret', b.line_secret, { type: 'password' }))}
       </div>
+
+      <div class="divider"></div>
+      <h3 style="font-size:.95rem;margin:.2rem 0 .6rem">スタンプによる月謝割引（任意）</h3>
+      <p class="muted" style="font-size:.85rem;margin-top:0">
+        審査料を現金で徴収する運用なら「使わない」のままで構いません。使う場合だけ、
+        台紙 2 枚目以降 1 枚ごとに割引が 1 段階増えます。
+      </p>
+      <div class="row">
+        ${field('割引を', selectBox('discount_enabled', [[0, '使わない'], [1, '使う']], b.discount_enabled))}
+        ${field('台紙 1 枚あたりの割引額（円）', textInput('discount_per_card', b.discount_per_card, { type: 'number' }))}
+        ${field('割引段階の上限', textInput('discount_max_cards', b.discount_max_cards, { type: 'number' }))}
+      </div>
+
       <div class="field" style="margin-top:.75rem">
-        <label>メモ</label>${textInput('note', b.note, { placeholder: '例）名西支部は LINE 連携なし。連絡はメールのみ。' })}
+        <label>メモ</label>${textInput('note', b.note, { placeholder: '例）名西支部は提携先の都合で LINE 連携なし。' })}
       </div>
       <button type="submit" style="margin-top:.5rem">保存</button>
     </form>
-  </div>`,
-    )
+  </div>`;
+    })
     .join('')}
 
   <div class="card">
@@ -279,9 +329,11 @@ function settingsPage(ctx) {
       <div class="row">
         ${field('支部名', textInput('name', '', { required: true }))}
         ${field('台紙 1 枚のスタンプ数', textInput('stamps_per_card', '30', { type: 'number' }))}
-        ${field('割引額（円 / 台紙 1 枚）', textInput('discount_per_card', '500', { type: 'number' }))}
         <div class="field" style="flex:0 0 auto"><button type="submit">追加</button></div>
       </div>
+      <p class="muted" style="font-size:.85rem;margin-bottom:0">
+        追加した支部は「メールのみ・割引なし」で始まります。LINE や割引はあとから切り替えられます。
+      </p>
     </form>
   </div>`;
 
@@ -356,10 +408,9 @@ export function register(router) {
     requireAdmin(ctx);
     const name = String(ctx.fields.name || '').trim();
     if (!name) throw new HttpError(400, '支部名は必須です');
-    run('INSERT INTO branches (name, stamps_per_card, discount_per_card) VALUES (?, ?, ?)', [
+    run('INSERT INTO branches (name, stamps_per_card) VALUES (?, ?)', [
       name,
       Number(ctx.fields.stamps_per_card) || 30,
-      Number(ctx.fields.discount_per_card) || 0,
     ]);
     redirect(ctx.res, `/branches?msg=${encodeURIComponent('支部を追加しました')}`);
   });
@@ -372,12 +423,14 @@ export function register(router) {
     const f = ctx.fields;
     const rule = ['stamp', 'stamp_skill', 'criteria'].includes(f.exam_rule) ? f.exam_rule : 'stamp';
     run(
-      `UPDATE branches SET name = ?, stamps_per_card = ?, discount_per_card = ?, discount_max_cards = ?,
-              exam_rule = ?, reset_on_promotion = ?, line_enabled = ?, line_token = ?, line_secret = ?, note = ?
+      `UPDATE branches SET name = ?, stamps_per_card = ?, discount_enabled = ?, discount_per_card = ?,
+              discount_max_cards = ?, exam_rule = ?, reset_on_promotion = ?, line_enabled = ?,
+              line_token = ?, line_secret = ?, note = ?
        WHERE id = ?`,
       [
         String(f.name || branch.name).trim(),
         Math.max(1, Number(f.stamps_per_card) || 30),
+        Number(f.discount_enabled) ? 1 : 0,
         Math.max(0, Number(f.discount_per_card) || 0),
         Math.max(0, Number(f.discount_max_cards) || 0),
         rule,
