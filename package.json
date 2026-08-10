@@ -1,0 +1,17 @@
+{
+  "name": "karate-dojo-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "空手道場の顧客管理・指導記録・会員向けコンテンツ配信・メール配信を一つにまとめた道場運営アプリ",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node --no-warnings=ExperimentalWarning src/server.js",
+    "dev": "node --no-warnings=ExperimentalWarning --watch src/server.js",
+    "seed": "node --no-warnings=ExperimentalWarning scripts/seed.js",
+    "reset": "node --no-warnings=ExperimentalWarning scripts/seed.js --reset",
+    "test": "node --no-warnings=ExperimentalWarning --test tests/*.test.js"
+  }
+}
