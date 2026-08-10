@@ -2,7 +2,7 @@ import { all, get, run } from '../db.js';
 import { html, redirect, esc, HttpError } from '../http.js';
 import { requireUser, requireAdmin } from '../auth.js';
 import { page, field, textInput, selectBox, nl2br } from '../views/layout.js';
-import { queueMail, renderTemplate, mailVars } from '../mail.js';
+import { queueNotification, renderTemplate, mailVars } from '../mail.js';
 
 const KINDS = ['大会', '審査', '合宿', '講習会', '演武会', 'その他'];
 
@@ -140,7 +140,7 @@ export function register(router) {
     requireAdmin(ctx);
     const event = get('SELECT * FROM events WHERE id = ?', [Number(ctx.params.id)]);
     if (!event) throw new HttpError(404, 'イベントが見つかりません');
-    const members = all("SELECT * FROM members WHERE status = 'active' AND email <> ''");
+    const members = all("SELECT * FROM members WHERE status = 'active'");
     const template = `{{name}} 様
 
 ${event.kind}のご案内です。
@@ -157,15 +157,13 @@ ${event.detail}
 
     let count = 0;
     for (const member of members) {
-      queueMail({
-        memberId: member.id,
-        to: member.email,
-        toName: member.name,
+      const result = queueNotification({
+        member,
         subject: `【${event.kind}】${event.title} のご案内`,
         body: renderTemplate(template, mailVars(member)),
       });
-      count += 1;
+      if (result.queued) count += 1;
     }
-    redirect(ctx.res, `/mail?msg=${encodeURIComponent(`${count} 件の案内メールを下書きに追加しました`)}`);
+    redirect(ctx.res, `/mail?msg=${encodeURIComponent(`${count} 件の案内を下書きに追加しました`)}`);
   });
 }

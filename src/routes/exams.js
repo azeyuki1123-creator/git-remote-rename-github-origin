@@ -3,7 +3,7 @@ import { html, redirect, esc, HttpError } from '../http.js';
 import { requireAdmin } from '../auth.js';
 import { page, beltTag, bar, field, textInput, selectBox } from '../views/layout.js';
 import { belts, examCandidates, examReadiness, memberWithBelt, nextBelt, beltById } from '../domain.js';
-import { queueMail, renderTemplate, mailVars } from '../mail.js';
+import { queueNotification, renderTemplate, mailVars } from '../mail.js';
 
 const DECISION_LABEL = {
   pending: '未判定',
@@ -21,21 +21,21 @@ function indexPage(ctx) {
 
   const body = `
   <h1>審査管理</h1>
-  <p class="sub">出席回数・在籍期間・習熟度の 3 条件から、次回審査の対象者を自動で抽出します。</p>
+  <p class="sub">支部の判定ルール（既定はスタンプカード 1 枚）にもとづいて、次回審査の対象者を自動で抽出します。</p>
 
   <div class="card">
     <h2 style="margin-top:0">次回審査の対象候補（${candidates.length} 名）</h2>
     ${
       candidates.length
         ? `<div class="table-wrap"><table>
-            <tr><th>生徒</th><th>現在</th><th>次の帯</th><th>出席</th><th>習熟度</th><th>達成度</th></tr>
+            <tr><th>生徒</th><th>現在</th><th>次の帯</th><th>スタンプ</th><th>習熟度</th><th>達成度</th></tr>
             ${candidates
               .map(
                 ({ member, readiness }) => `<tr>
               <td><a href="/members/${member.id}">${esc(member.name)}</a></td>
               <td>${beltTag(readiness.belt?.name, readiness.belt?.color)}</td>
               <td>${beltTag(readiness.nextBelt?.name ?? '—', readiness.nextBelt?.color)}</td>
-              <td class="nowrap">${readiness.attendance} 回</td>
+              <td class="nowrap">${readiness.stamps.examStamps} / ${readiness.stamps.perCard}</td>
               <td class="nowrap">${readiness.clearedSkills}/${readiness.totalSkills}</td>
               <td style="min-width:110px">${bar(readiness.progress)}</td>
             </tr>`,
@@ -257,17 +257,13 @@ export function register(router) {
 
     let count = 0;
     for (const member of rows) {
-      const to = member.email;
-      if (!to) continue;
-      queueMail({
-        memberId: member.id,
-        to,
-        toName: member.name,
+      const result = queueNotification({
+        member,
         subject,
         body: renderTemplate(template, mailVars(member)),
       });
-      count += 1;
+      if (result.queued) count += 1;
     }
-    redirect(ctx.res, `/mail?msg=${encodeURIComponent(`${count} 件の案内メールを下書きに追加しました`)}`);
+    redirect(ctx.res, `/mail?msg=${encodeURIComponent(`${count} 件の案内を下書きに追加しました`)}`);
   });
 }

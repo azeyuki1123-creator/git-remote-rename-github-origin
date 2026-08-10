@@ -3,14 +3,16 @@ import { esc } from '../http.js';
 import { STYLE } from './style.js';
 
 const ADMIN_NAV = [
-  ['/', 'ダッシュボード'],
-  ['/members', '生徒名簿'],
+  ['/', 'ホーム'],
+  ['/members', '名簿'],
   ['/attendance', '出欠'],
+  ['/stamps', 'スタンプ'],
   ['/exams', '審査'],
-  ['/videos', 'フォーム添削'],
+  ['/videos', '添削'],
   ['/contents', 'コンテンツ'],
-  ['/events', '試合・イベント'],
-  ['/mail', 'メール'],
+  ['/events', 'イベント'],
+  ['/mail', '連絡'],
+  ['/branches', '支部設定'],
 ];
 
 const MEMBER_NAV = [
@@ -93,6 +95,20 @@ export function textInput(name, value = '', { type = 'text', placeholder = '', r
   return `<input type="${type}" name="${esc(name)}" value="${esc(value)}" placeholder="${esc(placeholder)}"${
     required ? ' required' : ''
   }>`;
+}
+
+/** スタンプ台紙（30 マスなどのカード）を描画する */
+export function stampCard(summary) {
+  const filled = Math.min(summary.progress, summary.perCard);
+  const cells = Array.from({ length: summary.perCard }, (_, i) => {
+    const on = i < filled;
+    return `<i class="${on ? 'on' : ''}${on && i === filled - 1 ? ' new' : ''}">${on ? '押' : i + 1}</i>`;
+  }).join('');
+  return `<div class="stamp-card">${cells}</div>`;
+}
+
+export function yen(value) {
+  return `${Number(value || 0).toLocaleString('ja-JP')} 円`;
 }
 
 export function nl2br(text) {

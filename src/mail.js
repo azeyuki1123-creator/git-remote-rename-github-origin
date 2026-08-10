@@ -5,6 +5,8 @@ import tls from 'node:tls';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { all, get, run, OUTBOX_DIR } from './db.js';
+import { branchOf, stampSummary } from './stamps.js';
+import { pushMessage, resolveChannel } from './line.js';
 
 const config = () => ({
   transport: process.env.MAIL_TRANSPORT || 'outbox', // outbox | smtp
@@ -30,24 +32,53 @@ export function mailVars(member) {
   const belt = member.belt_id ? get('SELECT * FROM belts WHERE id = ?', [member.belt_id]) : null;
   const nextEvent = get("SELECT * FROM events WHERE starts_on >= date('now') ORDER BY starts_on LIMIT 1");
   const nextExam = get("SELECT * FROM exams WHERE held_on >= date('now') ORDER BY held_on LIMIT 1");
+  const stamps = stampSummary(member);
   return {
     name: member.name,
     kana: member.kana,
     belt: belt?.name || '',
+    branch: stamps.branch?.name || '',
     guardian: member.guardian_name || '',
     joined_on: member.joined_on || '',
     next_event: nextEvent ? `${nextEvent.title}（${nextEvent.starts_on}）` : '未定',
     next_exam: nextExam ? `${nextExam.name}（${nextExam.held_on}）` : '未定',
+    stamps: String(stamps.progress),
+    stamps_total: String(stamps.earned),
+    stamps_left: String(stamps.remaining),
+    discount: `${stamps.discountAmount.toLocaleString('ja-JP')} 円`,
   };
 }
 
-/** 送信キューに積む */
-export function queueMail({ memberId = null, to, toName = '', subject, body }) {
+/** 送信キューに積む（メール） */
+export function queueMail({ memberId = null, to, toName = '', subject, body, channel = 'email', toLineId = '' }) {
   const info = run(
-    'INSERT INTO mail_messages (member_id, to_email, to_name, subject, body) VALUES (?, ?, ?, ?, ?)',
-    [memberId, to, toName, subject, body],
+    `INSERT INTO mail_messages (member_id, to_email, to_name, subject, body, channel, to_line_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [memberId, to, toName, subject, body, channel, toLineId],
   );
   return Number(info.lastInsertRowid);
+}
+
+/**
+ * 生徒に合わせた連絡手段（LINE / メール）でキューに積む。
+ * LINE 連携がない支部・未連携の生徒は自動的にメールになる。
+ * 連絡先が無い生徒は積まずに skipped として返す。
+ */
+export function queueNotification({ member, subject, body }) {
+  const target = resolveChannel(member);
+  if (target.channel === 'none') {
+    return { queued: false, channel: 'none', reason: target.reason };
+  }
+  queueMail({
+    memberId: member.id,
+    to: target.channel === 'email' ? target.to : '',
+    toLineId: target.channel === 'line' ? target.to : '',
+    toName: member.name,
+    subject,
+    body,
+    channel: target.channel,
+  });
+  return { queued: true, channel: target.channel };
 }
 
 function encodeWord(text) {
@@ -91,6 +122,8 @@ export async function flushQueue() {
 
 async function deliver(message) {
   const cfg = config();
+  if (message.channel === 'line') return deliverLine(message);
+
   const mime = buildMime(message);
   if (cfg.transport === 'smtp') {
     if (!cfg.host) throw new Error('SMTP_HOST が設定されていません');
@@ -100,6 +133,20 @@ async function deliver(message) {
   // outbox モード：ファイルに書き出すだけ（開発・動作確認用）
   const file = join(OUTBOX_DIR, `${String(message.id).padStart(6, '0')}-${Date.now()}.eml`);
   await writeFile(file, mime, 'utf8');
+}
+
+async function deliverLine(message) {
+  const member = message.member_id ? get('SELECT * FROM members WHERE id = ?', [message.member_id]) : null;
+  const branch = member ? branchOf(member) : null;
+  const text = `${message.subject}\n\n${message.body}`;
+
+  // トークン未設定・outbox モードのときはファイルに落として実送信しない
+  if (config().transport !== 'smtp' || !branch?.line_token) {
+    const file = join(OUTBOX_DIR, `${String(message.id).padStart(6, '0')}-${Date.now()}-line.txt`);
+    await writeFile(file, `to: ${message.to_line_id}\n\n${text}`, 'utf8');
+    return;
+  }
+  await pushMessage({ token: branch.line_token, to: message.to_line_id, text });
 }
 
 /**
@@ -217,6 +264,7 @@ export function mailStats() {
     queued: get("SELECT COUNT(*) AS c FROM mail_messages WHERE status = 'queued'").c,
     sent: get("SELECT COUNT(*) AS c FROM mail_messages WHERE status = 'sent'").c,
     failed: get("SELECT COUNT(*) AS c FROM mail_messages WHERE status = 'failed'").c,
+    line: get("SELECT COUNT(*) AS c FROM mail_messages WHERE channel = 'line'").c,
     transport: config().transport,
   };
 }

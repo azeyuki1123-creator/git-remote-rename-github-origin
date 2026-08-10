@@ -16,6 +16,8 @@ import * as contentRoutes from './routes/contents.js';
 import * as videoRoutes from './routes/videos.js';
 import * as eventRoutes from './routes/events.js';
 import * as mailRoutes from './routes/mail.js';
+import * as stampRoutes from './routes/stamps.js';
+import * as lineRoutes from './routes/line.js';
 
 const router = new Router();
 for (const mod of [
@@ -28,6 +30,8 @@ for (const mod of [
   videoRoutes,
   eventRoutes,
   mailRoutes,
+  stampRoutes,
+  lineRoutes,
 ]) {
   mod.register(router);
 }
@@ -65,6 +69,7 @@ export function createServer() {
         const parsed = await parseBody(req);
         ctx.fields = parsed.fields;
         ctx.files = parsed.files;
+        ctx.raw = parsed.raw;
       }
 
       await match.handler(ctx);

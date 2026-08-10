@@ -1,5 +1,6 @@
 // 道場運営のドメインロジック（審査対象判定・コンテンツ開放判定・ポイント計算）。
 import { all, get } from './db.js';
+import { stampSummary } from './stamps.js';
 
 export function belts() {
   return all('SELECT * FROM belts ORDER BY rank_order');
@@ -33,11 +34,16 @@ export function monthsSince(dateStr) {
 
 /**
  * 審査対象かどうかの判定。
- * 出席回数・在籍月数・現在の帯の技術項目の習熟度の 3 条件で評価する。
+ * 判定ルールは支部設定（branches.exam_rule）で切り替える。
+ *   stamp       … スタンプカードが 1 枚たまったら受験資格（本部方式）
+ *   stamp_skill … スタンプカード＋現在の帯の習熟度 80%
+ *   criteria    … 出席回数・在籍月数・習熟度の 3 条件
  */
 export function examReadiness(member) {
   const belt = beltById(member.belt_id);
   const since = baseDate(member);
+  const stamps = stampSummary(member);
+  const rule = stamps.branch?.exam_rule || 'stamp';
 
   const attendance = get(
     `SELECT COUNT(*) AS c FROM attendance a
@@ -59,20 +65,49 @@ export function examReadiness(member) {
 
   const needSessions = belt?.min_sessions ?? 20;
   const needMonths = belt?.min_months ?? 3;
-  const checks = [
-    { label: '出席回数', ok: attendance >= needSessions, detail: `${attendance} / ${needSessions} 回` },
-    { label: '在籍期間', ok: months >= needMonths, detail: `${months} / ${needMonths} ヶ月` },
-    {
-      label: '習熟度',
-      ok: totalSkills > 0 && skillRate >= 0.8,
-      detail: `${clearedSkills} / ${totalSkills} 項目（${Math.round(skillRate * 100)}%）`,
-    },
-  ];
+
+  const stampCheck = {
+    label: 'スタンプ',
+    ok: stamps.examEligible,
+    detail: `${stamps.progress} / ${stamps.perCard} 個`,
+    ratio: Math.min(1, stamps.examStamps / stamps.perCard),
+  };
+  const skillCheck = {
+    label: '習熟度',
+    ok: totalSkills > 0 && skillRate >= 0.8,
+    detail: `${clearedSkills} / ${totalSkills} 項目（${Math.round(skillRate * 100)}%）`,
+    ratio: totalSkills === 0 ? 0 : Math.min(1, skillRate / 0.8),
+  };
+
+  let checks;
+  if (rule === 'criteria') {
+    checks = [
+      {
+        label: '出席回数',
+        ok: attendance >= needSessions,
+        detail: `${attendance} / ${needSessions} 回`,
+        ratio: Math.min(1, attendance / needSessions),
+      },
+      {
+        label: '在籍期間',
+        ok: months >= needMonths,
+        detail: `${months} / ${needMonths} ヶ月`,
+        ratio: Math.min(1, months / needMonths),
+      },
+      skillCheck,
+    ];
+  } else if (rule === 'stamp_skill') {
+    checks = [stampCheck, skillCheck];
+  } else {
+    checks = [stampCheck];
+  }
 
   const autoReady = checks.every((c) => c.ok);
   return {
     belt,
     nextBelt: nextBelt(belt),
+    rule,
+    stamps,
     attendance,
     months,
     skillRate,
@@ -82,10 +117,7 @@ export function examReadiness(member) {
     autoReady,
     ready: autoReady || member.exam_flag === 1,
     manual: member.exam_flag === 1,
-    progress: Math.min(
-      1,
-      (Math.min(1, attendance / needSessions) + Math.min(1, months / needMonths) + Math.min(1, skillRate / 0.8)) / 3,
-    ),
+    progress: checks.reduce((sum, c) => sum + c.ratio, 0) / checks.length,
   };
 }
 
@@ -155,13 +187,16 @@ export function memberById(id) {
 
 export function memberWithBelt(id) {
   return get(
-    `SELECT m.*, b.name AS belt_name, b.color AS belt_color, b.rank_order
-     FROM members m JOIN belts b ON b.id = m.belt_id WHERE m.id = ?`,
+    `SELECT m.*, b.name AS belt_name, b.color AS belt_color, b.rank_order, br.name AS branch_name
+     FROM members m
+     JOIN belts b ON b.id = m.belt_id
+     LEFT JOIN branches br ON br.id = m.branch_id
+     WHERE m.id = ?`,
     [id],
   );
 }
 
-export function listMembers({ status = '', beltId = '', keyword = '' } = {}) {
+export function listMembers({ status = '', beltId = '', branchId = '', keyword = '' } = {}) {
   const params = [];
   const where = [];
   if (status) {
@@ -172,13 +207,19 @@ export function listMembers({ status = '', beltId = '', keyword = '' } = {}) {
     where.push('m.belt_id = ?');
     params.push(Number(beltId));
   }
+  if (branchId) {
+    where.push('m.branch_id = ?');
+    params.push(Number(branchId));
+  }
   if (keyword) {
     where.push('(m.name LIKE ? OR m.kana LIKE ? OR m.email LIKE ?)');
     const like = `%${keyword}%`;
     params.push(like, like, like);
   }
-  let sql = `SELECT m.*, b.name AS belt_name, b.color AS belt_color, b.rank_order
-             FROM members m JOIN belts b ON b.id = m.belt_id`;
+  let sql = `SELECT m.*, b.name AS belt_name, b.color AS belt_color, b.rank_order, br.name AS branch_name
+             FROM members m
+             JOIN belts b ON b.id = m.belt_id
+             LEFT JOIN branches br ON br.id = m.branch_id`;
   if (where.length) sql += ` WHERE ${where.join(' AND ')}`;
   sql += ' ORDER BY b.rank_order DESC, m.kana, m.id';
   return all(sql, params);

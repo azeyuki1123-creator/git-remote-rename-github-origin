@@ -3,7 +3,8 @@ import { html, redirect, esc, HttpError } from '../http.js';
 import { requireAdmin } from '../auth.js';
 import { page, stat, field, textInput, selectBox } from '../views/layout.js';
 import { belts, examCandidates, listMembers } from '../domain.js';
-import { queueMail, renderTemplate, mailVars, flushQueue, mailLog, mailStats } from '../mail.js';
+import { queueNotification, renderTemplate, mailVars, flushQueue, mailLog, mailStats } from '../mail.js';
+import { branches } from '../stamps.js';
 
 const SEGMENTS = [
   ['all', '在籍中の全会員'],
@@ -35,16 +36,22 @@ function indexPage(ctx) {
   const templates = all('SELECT * FROM mail_templates ORDER BY id');
   const log = mailLog(50);
   const beltList = belts();
+  const lineOffBranches = branches().filter((b) => !b.line_enabled);
 
   const body = `
-  <h1>メール配信</h1>
+  <h1>メール・LINE 配信</h1>
   <p class="sub">対象を絞って下書きを作成し、内容を確認してからまとめて送信します。現在の送信方法：<strong>${esc(
     stats.transport === 'smtp' ? 'SMTP 送信' : 'outbox（data/outbox にファイル出力）',
   )}</strong></p>
+  <p class="sub">
+    宛先は生徒ごとに自動で決まります（LINE 連携済み → LINE、それ以外 → メール）。
+    LINE を使わない支部：${esc(lineOffBranches.map((b) => b.name).join('、') || 'なし')}
+  </p>
 
-  <div class="grid cols-3">
+  <div class="grid cols-4">
     ${stat(stats.queued, '未送信（下書き）')}
     ${stat(stats.sent, '送信済み')}
+    ${stat(stats.line, 'LINE で送る分')}
     ${stat(stats.failed, '失敗')}
   </div>
 
@@ -63,7 +70,7 @@ function indexPage(ctx) {
         <label>件名（テンプレート選択時は空欄で可）</label>${textInput('subject', '')}
       </div>
       <div class="field">
-        <label>本文（{{name}} {{belt}} {{next_exam}} {{next_event}} が差し込めます）</label>
+        <label>本文（{{name}} {{belt}} {{branch}} {{stamps}} {{stamps_left}} {{discount}} {{next_exam}} {{next_event}} が差し込めます）</label>
         <textarea name="body" placeholder="{{name}} 様&#10;&#10;いつも稽古お疲れさまです。"></textarea>
       </div>
       <button type="submit">下書きを作成</button>
@@ -81,14 +88,17 @@ function indexPage(ctx) {
   <div class="card">
     <h2 style="margin-top:0">送信ログ</h2>
     <div class="table-wrap"><table>
-      <tr><th>作成日時</th><th>宛先</th><th>件名</th><th>状態</th><th></th></tr>
+      <tr><th>作成日時</th><th>手段</th><th>宛先</th><th>件名</th><th>状態</th><th></th></tr>
       ${
         log.length
           ? log
               .map(
                 (m) => `<tr>
         <td class="nowrap">${esc(m.created_at)}</td>
-        <td>${esc(m.to_name || '')}<br><span class="muted" style="font-size:.8rem">${esc(m.to_email)}</span></td>
+        <td><span class="badge">${m.channel === 'line' ? 'LINE' : 'メール'}</span></td>
+        <td>${esc(m.to_name || '')}<br><span class="muted" style="font-size:.8rem">${esc(
+          m.channel === 'line' ? m.to_line_id : m.to_email,
+        )}</span></td>
         <td>${esc(m.subject)}</td>
         <td>${
           m.status === 'sent'
@@ -105,7 +115,7 @@ function indexPage(ctx) {
       </tr>`,
               )
               .join('')
-          : '<tr><td colspan="5" class="muted">まだメールはありません。</td></tr>'
+          : '<tr><td colspan="6" class="muted">まだ連絡はありません。</td></tr>'
       }
     </table></div>
   </div>
@@ -162,26 +172,24 @@ export function register(router) {
     if (!subject) throw new HttpError(400, '件名を入力してください');
 
     const targets = resolveSegment(ctx.fields.segment, ctx.fields.belt_id);
-    let count = 0;
+    let email = 0;
+    let line = 0;
     let skipped = 0;
     for (const member of targets) {
-      const to = member.email || '';
-      if (!to) {
-        skipped += 1;
-        continue;
-      }
       const vars = mailVars(member);
-      queueMail({
-        memberId: member.id,
-        to,
-        toName: member.name,
+      const result = queueNotification({
+        member,
         subject: renderTemplate(subject, vars),
         body: renderTemplate(body, vars),
       });
-      count += 1;
+      if (!result.queued) skipped += 1;
+      else if (result.channel === 'line') line += 1;
+      else email += 1;
     }
-    const msg = `${count} 件の下書きを作成しました${skipped ? `（メール未登録の ${skipped} 名は除外）` : ''}`;
-    redirect(ctx.res, `/mail?msg=${encodeURIComponent(msg)}`);
+    const parts = [`メール ${email} 件`];
+    if (line) parts.push(`LINE ${line} 件`);
+    if (skipped) parts.push(`連絡先なし ${skipped} 名は除外`);
+    redirect(ctx.res, `/mail?msg=${encodeURIComponent(`下書きを作成しました（${parts.join(' / ')}）`)}`);
   });
 
   router.post('/mail/send', async (ctx) => {

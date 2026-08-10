@@ -1,8 +1,11 @@
 import { all, get, run, tx } from '../db.js';
 import { html, redirect, esc, HttpError } from '../http.js';
 import { requireAdmin, hashPassword } from '../auth.js';
-import { page, beltTag, bar, field, textInput, selectBox, stat } from '../views/layout.js';
+import { page, beltTag, bar, field, textInput, selectBox, stat, yen } from '../views/layout.js';
 import { belts, listMembers, memberWithBelt, examReadiness, memberPoints, nextBelt, beltById } from '../domain.js';
+import { branches, branchOf } from '../stamps.js';
+import { issueLinkCode, unlink } from '../line.js';
+import { memberStampSection } from './stamps.js';
 
 const STATUS_LABEL = { active: '在籍', rest: '休会', left: '退会' };
 const PLAN_LABEL = { standard: '通常', premium: 'プレミアム' };
@@ -26,8 +29,17 @@ function memberForm(member = {}, beltList) {
     ${field('保護者氏名', textInput('guardian_name', member.guardian_name))}
   </div>
   <div class="row" style="margin-top:.75rem">
+    ${field('支部', selectBox('branch_id', branches().map((b) => [b.id, b.name]), member.branch_id))}
     ${field('会員プラン', selectBox('plan', Object.entries(PLAN_LABEL), member.plan || 'standard'))}
     ${field('在籍状況', selectBox('status', Object.entries(STATUS_LABEL), member.status || 'active'))}
+    ${field(
+      '連絡方法',
+      selectBox(
+        'notify_channel',
+        [['auto', '自動（LINE 連携済みなら LINE）'], ['email', 'メールのみ'], ['line', 'LINE のみ']],
+        member.notify_channel || 'auto',
+      ),
+    )}
   </div>
   <div class="field" style="margin-top:.75rem">
     <label>メモ</label><textarea name="notes" style="min-height:5rem">${esc(member.notes || '')}</textarea>
@@ -36,10 +48,12 @@ function memberForm(member = {}, beltList) {
 
 function indexPage(ctx) {
   const beltList = belts();
+  const branchList = branches();
   const status = ctx.query.get('status') ?? 'active';
   const beltId = ctx.query.get('belt') ?? '';
+  const branchId = ctx.query.get('branch') ?? '';
   const keyword = ctx.query.get('q') ?? '';
-  const rows = listMembers({ status, beltId, keyword });
+  const rows = listMembers({ status, beltId, branchId, keyword });
 
   const body = `
   <h1>生徒名簿</h1>
@@ -48,6 +62,7 @@ function indexPage(ctx) {
   <form method="get" action="/members" class="card">
     <div class="row">
       ${field('キーワード', textInput('q', keyword, { placeholder: '氏名・ふりがな・メール' }))}
+      ${field('支部', selectBox('branch', branchList.map((b) => [b.id, b.name]), branchId, { blank: 'すべて' }))}
       ${field('帯', selectBox('belt', beltList.map((b) => [b.id, b.name]), beltId, { blank: 'すべて' }))}
       ${field('在籍状況', selectBox('status', Object.entries(STATUS_LABEL), status, { blank: 'すべて' }))}
       <div class="field" style="flex:0 0 auto"><button type="submit">絞り込む</button></div>
@@ -56,7 +71,7 @@ function indexPage(ctx) {
 
   <div class="card">
     <div class="table-wrap"><table>
-      <tr><th>氏名</th><th>帯</th><th>在籍</th><th>プラン</th><th>出席</th><th>審査</th><th></th></tr>
+      <tr><th>氏名</th><th>支部</th><th>帯</th><th>在籍</th><th>スタンプ</th><th>割引</th><th>審査</th><th></th></tr>
       ${
         rows.length
           ? rows
@@ -66,10 +81,12 @@ function indexPage(ctx) {
         <td><a href="/members/${m.id}">${esc(m.name)}</a><br><span class="muted" style="font-size:.8rem">${esc(
           m.kana,
         )}</span></td>
+        <td class="nowrap">${esc(m.branch_name || '—')}</td>
         <td>${beltTag(m.belt_name, m.belt_color)}</td>
         <td><span class="badge">${esc(STATUS_LABEL[m.status] || m.status)}</span></td>
-        <td>${esc(PLAN_LABEL[m.plan] || m.plan)}</td>
-        <td class="nowrap">${r.attendance} 回</td>
+        <td class="nowrap">${r.stamps.progress} / ${r.stamps.perCard}<br>
+          <span class="muted" style="font-size:.8rem">累計 ${r.stamps.earned}</span></td>
+        <td class="nowrap">${r.stamps.discountCards ? yen(r.stamps.discountAmount) : '—'}</td>
         <td style="min-width:120px">${
           r.ready ? '<span class="badge ok">対象</span>' : bar(r.progress)
         }</td>
@@ -77,7 +94,7 @@ function indexPage(ctx) {
       </tr>`;
               })
               .join('')
-          : '<tr><td colspan="7" class="muted">該当する生徒がいません。</td></tr>'
+          : '<tr><td colspan="8" class="muted">該当する生徒がいません。</td></tr>'
       }
     </table></div>
   </div>
@@ -98,7 +115,6 @@ function detailPage(ctx) {
   if (!member) throw new HttpError(404, '生徒が見つかりません');
   const beltList = belts();
   const readiness = examReadiness(member);
-  const points = memberPoints(member.id);
 
   const skillItems = all('SELECT * FROM skill_items WHERE belt_id = ? ORDER BY sort_no, id', [member.belt_id]);
   const levels = new Map(
@@ -115,19 +131,22 @@ function detailPage(ctx) {
   const videos = all('SELECT * FROM video_submissions WHERE member_id = ? ORDER BY id DESC LIMIT 5', [member.id]);
   const account = member.user_id ? get('SELECT * FROM users WHERE id = ?', [member.user_id]) : null;
   const next = nextBelt(beltById(member.belt_id));
+  const lineBranch = branchOf(member);
 
   const body = `
   <h1>${esc(member.name)} <span class="muted" style="font-size:1rem">${esc(member.kana)}</span></h1>
-  <p class="sub">${beltTag(member.belt_name, member.belt_color)} ／ 入会 ${esc(member.joined_on)} ／ ${esc(
-    STATUS_LABEL[member.status] || member.status,
-  )}</p>
+  <p class="sub">${beltTag(member.belt_name, member.belt_color)} ／ ${esc(member.branch_name || '支部未設定')}
+    ／ 入会 ${esc(member.joined_on)} ／ ${esc(STATUS_LABEL[member.status] || member.status)}
+    ${readiness.stamps.discountCards ? ` ／ 月謝割引 ${yen(readiness.stamps.discountAmount)}` : ''}</p>
 
   <div class="grid cols-4">
-    ${stat(points.total.toLocaleString('ja-JP'), '道場ポイント')}
-    ${stat(readiness.attendance, `${esc(member.belt_name)}取得後の出席`)}
+    ${stat(`${readiness.stamps.progress} / ${readiness.stamps.perCard}`, 'スタンプ（現在の台紙）')}
+    ${stat(readiness.stamps.earned, '累計スタンプ')}
     ${stat(`${readiness.clearedSkills}/${readiness.totalSkills}`, '習得済みの技術項目')}
     ${stat(readiness.ready ? '対象' : '準備中', '次回審査')}
   </div>
+
+  ${memberStampSection(member)}
 
   <div class="grid cols-2">
     <div class="card">
@@ -155,6 +174,29 @@ function detailPage(ctx) {
               <button class="small">${esc(next.name)}に昇級を記録</button>
             </form>`
           : '<span class="muted">最上位の帯です。</span>'
+      }
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">LINE 連携</h2>
+      ${
+        !lineBranch?.line_enabled
+          ? `<p class="muted">${esc(lineBranch?.name ?? '所属支部')}は LINE 連携を使わない設定です。連絡はメールで届きます。</p>
+             <a class="btn ghost small" href="/branches">支部設定を開く</a>`
+          : member.line_user_id
+            ? `<p><span class="badge ok">連携済み</span> 連絡は LINE に届きます。</p>
+               <form method="post" action="/members/${member.id}/line/unlink" class="inline">
+                 <button class="ghost small">連携を解除</button></form>`
+            : `<p class="muted">生徒が道場の LINE 公式アカウントに 6 桁の連携コードを送ると紐づきます。</p>
+               ${
+                 member.line_link_code
+                   ? `<p>連携コード：<strong style="font-size:1.3rem;letter-spacing:.2em">${esc(
+                       member.line_link_code,
+                     )}</strong></p>`
+                   : ''
+               }
+               <form method="post" action="/members/${member.id}/line/code" class="inline">
+                 <button class="small">連携コードを発行</button></form>`
       }
     </div>
 
@@ -279,6 +321,8 @@ function fromFields(f) {
     f.plan === 'premium' ? 'premium' : 'standard',
     ['active', 'rest', 'left'].includes(f.status) ? f.status : 'active',
     String(f.notes || ''),
+    Number(f.branch_id) || null,
+    ['auto', 'email', 'line'].includes(f.notify_channel) ? f.notify_channel : 'auto',
   ];
 }
 
@@ -294,8 +338,8 @@ export function register(router) {
     if (!values[0]) throw new HttpError(400, '氏名は必須です');
     const info = run(
       `INSERT INTO members (name, kana, birthday, belt_id, joined_on, last_promoted_on, phone, email,
-                            guardian_name, plan, status, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                            guardian_name, plan, status, notes, branch_id, notify_channel)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       values,
     );
     redirect(ctx.res, `/members/${info.lastInsertRowid}?msg=${encodeURIComponent('生徒を登録しました')}`);
@@ -311,7 +355,8 @@ export function register(router) {
     const id = Number(ctx.params.id);
     run(
       `UPDATE members SET name = ?, kana = ?, birthday = ?, belt_id = ?, joined_on = ?, last_promoted_on = ?,
-              phone = ?, email = ?, guardian_name = ?, plan = ?, status = ?, notes = ? WHERE id = ?`,
+              phone = ?, email = ?, guardian_name = ?, plan = ?, status = ?, notes = ?, branch_id = ?,
+              notify_channel = ? WHERE id = ?`,
       [...fromFields(ctx.fields), id],
     );
     redirect(ctx.res, `/members/${id}?msg=${encodeURIComponent('保存しました')}`);
@@ -355,6 +400,20 @@ export function register(router) {
     if (!next) throw new HttpError(400, 'これ以上の帯がありません');
     run("UPDATE members SET belt_id = ?, last_promoted_on = date('now'), exam_flag = 0 WHERE id = ?", [next.id, id]);
     redirect(ctx.res, `/members/${id}?msg=${encodeURIComponent(`${next.name}への昇級を記録しました`)}`);
+  });
+
+  router.post('/members/:id/line/code', (ctx) => {
+    requireAdmin(ctx);
+    const id = Number(ctx.params.id);
+    const code = issueLinkCode(id);
+    redirect(ctx.res, `/members/${id}?msg=${encodeURIComponent(`連携コード ${code} を発行しました`)}`);
+  });
+
+  router.post('/members/:id/line/unlink', (ctx) => {
+    requireAdmin(ctx);
+    const id = Number(ctx.params.id);
+    unlink(id);
+    redirect(ctx.res, `/members/${id}?msg=${encodeURIComponent('LINE 連携を解除しました')}`);
   });
 
   router.post('/members/:id/account', (ctx) => {

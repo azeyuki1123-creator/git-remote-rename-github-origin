@@ -116,6 +116,22 @@ button.small, .btn.small { padding: .2rem .55rem; font-size: .82rem; }
 .chips a { text-decoration: none; font-size: .85rem; padding: .2rem .7rem; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); }
 .chips a.active { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .login-wrap { max-width: 380px; margin: 4rem auto; }
+.stamp-card {
+  display: grid; grid-template-columns: repeat(10, 1fr); gap: .3rem; margin: .6rem 0;
+}
+@media (max-width: 520px) { .stamp-card { grid-template-columns: repeat(6, 1fr); } }
+.stamp-card i {
+  aspect-ratio: 1; border-radius: 50%; border: 1px dashed var(--line);
+  display: flex; align-items: center; justify-content: center;
+  font-size: .8rem; font-style: normal; color: var(--lock);
+}
+.stamp-card i.on {
+  border: 1px solid var(--accent); border-style: solid;
+  background: var(--accent-soft); color: var(--accent); font-weight: 700;
+}
+.stamp-card i.new { box-shadow: 0 0 0 3px var(--accent-soft); }
+.stamp-meta { display: flex; gap: 1.2rem; flex-wrap: wrap; align-items: baseline; }
+.stamp-meta b { font-size: 1.4rem; }
 video { width: 100%; border-radius: 8px; background: #000; }
 .list-reset { list-style: none; padding: 0; margin: 0; }
 .divider { height: 1px; background: var(--line); margin: 1rem 0; }

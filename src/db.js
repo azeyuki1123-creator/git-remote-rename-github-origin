@@ -20,6 +20,38 @@ db.exec('PRAGMA journal_mode = WAL');
 db.exec('PRAGMA foreign_keys = ON');
 
 const SCHEMA = `
+-- 支部。スタンプ・割引・審査ルール・LINE 連携の可否は支部ごとに設定する。
+CREATE TABLE IF NOT EXISTS branches (
+  id                 INTEGER PRIMARY KEY,
+  name               TEXT NOT NULL,
+  is_main            INTEGER NOT NULL DEFAULT 0,
+  stamps_per_card    INTEGER NOT NULL DEFAULT 30,   -- 台紙 1 枚に必要なスタンプ数
+  discount_per_card  INTEGER NOT NULL DEFAULT 500,  -- 台紙 1 枚ごとの割引額（円）
+  discount_max_cards INTEGER NOT NULL DEFAULT 6,    -- 割引段階の上限
+  exam_rule          TEXT NOT NULL DEFAULT 'stamp', -- stamp / stamp_skill / criteria
+  reset_on_promotion INTEGER NOT NULL DEFAULT 1,    -- 昇級したら審査用のスタンプを数え直す
+  line_enabled       INTEGER NOT NULL DEFAULT 0,
+  line_token         TEXT NOT NULL DEFAULT '',      -- Messaging API のチャネルアクセストークン
+  line_secret        TEXT NOT NULL DEFAULT '',      -- 署名検証用のチャネルシークレット
+  note               TEXT NOT NULL DEFAULT ''
+);
+
+-- 出席スタンプ。指導者だけが押せる（granted_by は必ず指導者の user_id）。
+CREATE TABLE IF NOT EXISTS stamps (
+  id          INTEGER PRIMARY KEY,
+  member_id   INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+  branch_id   INTEGER REFERENCES branches(id),
+  session_id  INTEGER REFERENCES training_sessions(id) ON DELETE SET NULL,
+  granted_on  TEXT NOT NULL DEFAULT (date('now')),
+  reason      TEXT NOT NULL DEFAULT '稽古出席',
+  granted_by  INTEGER REFERENCES users(id),
+  status      TEXT NOT NULL DEFAULT 'active',  -- active / void
+  voided_by   INTEGER REFERENCES users(id),
+  voided_at   TEXT,
+  void_reason TEXT NOT NULL DEFAULT '',
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- 帯（級・段）。rank_order が大きいほど上位。
 CREATE TABLE IF NOT EXISTS belts (
   id          INTEGER PRIMARY KEY,
@@ -201,14 +233,46 @@ CREATE TABLE IF NOT EXISTS mail_messages (
   sent_at    TEXT
 );
 
+CREATE INDEX IF NOT EXISTS idx_stamps_member ON stamps(member_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_stamps_session ON stamps(member_id, session_id)
+  WHERE session_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_attendance_member ON attendance(member_id);
 CREATE INDEX IF NOT EXISTS idx_assessments_member ON assessments(member_id);
 CREATE INDEX IF NOT EXISTS idx_contents_belt ON contents(min_belt_id);
 CREATE INDEX IF NOT EXISTS idx_mail_status ON mail_messages(status);
 `;
 
+// 既存の DB にも後から列を足せるようにする
+const ADDED_COLUMNS = [
+  ['members', 'branch_id', 'INTEGER REFERENCES branches(id)'],
+  ['members', 'line_user_id', "TEXT NOT NULL DEFAULT ''"],
+  ['members', 'line_link_code', "TEXT NOT NULL DEFAULT ''"],
+  ['members', 'notify_channel', "TEXT NOT NULL DEFAULT 'auto'"], // auto / email / line
+  ['training_sessions', 'branch_id', 'INTEGER REFERENCES branches(id)'],
+  ['mail_messages', 'channel', "TEXT NOT NULL DEFAULT 'email'"], // email / line
+  ['mail_messages', 'to_line_id', "TEXT NOT NULL DEFAULT ''"],
+];
+
+function ensureColumn(table, column, definition) {
+  const exists = db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+  if (!exists) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
 export function migrate() {
   db.exec(SCHEMA);
+  for (const [table, column, definition] of ADDED_COLUMNS) ensureColumn(table, column, definition);
+
+  // 支部が 1 つも無ければ本部を作り、未所属の生徒・稽古をそこに寄せる
+  const branch = db.prepare('SELECT id FROM branches ORDER BY id LIMIT 1').get();
+  const mainId = branch
+    ? branch.id
+    : Number(
+        db
+          .prepare("INSERT INTO branches (name, is_main, line_enabled) VALUES ('本部', 1, 0)")
+          .run().lastInsertRowid,
+      );
+  db.exec(`UPDATE members SET branch_id = ${mainId} WHERE branch_id IS NULL`);
+  db.exec(`UPDATE training_sessions SET branch_id = ${mainId} WHERE branch_id IS NULL`);
 }
 
 migrate();

@@ -1,8 +1,9 @@
 import { all, get, run, tx } from '../db.js';
 import { html, redirect, esc, HttpError } from '../http.js';
 import { requireAdmin } from '../auth.js';
-import { page, beltTag, field, textInput, stat } from '../views/layout.js';
+import { page, beltTag, field, textInput, selectBox, stat } from '../views/layout.js';
 import { listMembers } from '../domain.js';
+import { branches, grantStamp, voidStampForSession, stampSummary } from '../stamps.js';
 
 const STATUSES = [
   ['present', '出席'],
@@ -41,6 +42,7 @@ function indexPage(ctx) {
       <div class="row">
         ${field('日付', textInput('held_on', new Date().toISOString().slice(0, 10), { type: 'date', required: true }))}
         ${field('内容', textInput('title', '通常稽古', { required: true }))}
+        ${field('支部', selectBox('branch_id', branches().map((b) => [b.id, b.name]), ''))}
         ${field('場所', textInput('place', ''))}
         <div class="field" style="flex:0 0 auto"><button type="submit">作成して出欠をとる</button></div>
       </div>
@@ -75,9 +77,12 @@ function detailPage(ctx) {
   const id = Number(ctx.params.id);
   const session = get('SELECT * FROM training_sessions WHERE id = ?', [id]);
   if (!session) throw new HttpError(404, '稽古が見つかりません');
-  const members = listMembers({ status: 'active' });
+  const members = listMembers({ status: 'active', branchId: session.branch_id || '' });
   const current = new Map(
     all('SELECT * FROM attendance WHERE session_id = ?', [id]).map((a) => [a.member_id, a.status]),
+  );
+  const stampedHere = new Set(
+    all("SELECT member_id FROM stamps WHERE session_id = ? AND status = 'active'", [id]).map((s) => s.member_id),
   );
 
   const body = `
@@ -87,10 +92,11 @@ function detailPage(ctx) {
   <form method="post" action="/attendance/${id}">
     <div class="card">
       <div class="table-wrap"><table>
-        <tr><th>生徒</th><th>帯</th><th>出欠</th></tr>
+        <tr><th>生徒</th><th>帯</th><th>出欠</th><th class="right">スタンプ</th></tr>
         ${members
           .map((m) => {
             const status = current.get(m.id) || 'present';
+            const summary = stampSummary(m);
             return `<tr>
           <td>${esc(m.name)}<br><span class="muted" style="font-size:.8rem">${esc(m.kana)}</span></td>
           <td>${beltTag(m.belt_name, m.belt_color)}</td>
@@ -101,14 +107,22 @@ function detailPage(ctx) {
                   status === v ? ' checked' : ''
                 }> ${esc(label)}</label>`,
           ).join('')}</td>
+          <td class="right nowrap">${summary.progress} / ${summary.perCard}${
+            stampedHere.has(m.id) ? ' <span class="badge ok">押印済</span>' : ''
+          }</td>
         </tr>`;
           })
           .join('')}
       </table></div>
       <div class="row" style="margin-top:.9rem">
         ${field('稽古メモ', textInput('note', session.note, { placeholder: '指導内容・気づきなど' }))}
+        ${field('スタンプ', selectBox('auto_stamp', [[1, '出席・遅刻に自動で押す'], [0, '押さない']], 1))}
         <div class="field" style="flex:0 0 auto"><button type="submit">出欠を保存</button></div>
       </div>
+      <p class="muted" style="font-size:.85rem;margin-bottom:0">
+        保存すると出席・遅刻の生徒にスタンプが 1 個ずつ押されます（同じ稽古で二重には押されません）。
+        欠席に直すと、その稽古のスタンプは自動で取り消されます。
+      </p>
     </div>
   </form>`;
 
@@ -123,10 +137,11 @@ export function register(router) {
 
   router.post('/attendance', (ctx) => {
     requireAdmin(ctx);
-    const info = run('INSERT INTO training_sessions (held_on, title, place) VALUES (?, ?, ?)', [
+    const info = run('INSERT INTO training_sessions (held_on, title, place, branch_id) VALUES (?, ?, ?, ?)', [
       ctx.fields.held_on,
       String(ctx.fields.title || '通常稽古'),
       String(ctx.fields.place || ''),
+      Number(ctx.fields.branch_id) || null,
     ]);
     redirect(ctx.res, `/attendance/${info.lastInsertRowid}`);
   });
@@ -137,21 +152,43 @@ export function register(router) {
   });
 
   router.post('/attendance/:id', (ctx) => {
-    requireAdmin(ctx);
+    const admin = requireAdmin(ctx);
     const id = Number(ctx.params.id);
+    const session = get('SELECT * FROM training_sessions WHERE id = ?', [id]);
+    if (!session) throw new HttpError(404, '稽古が見つかりません');
+    const autoStamp = ctx.fields.auto_stamp !== '0';
+    let stamped = 0;
+
     tx(() => {
       run('UPDATE training_sessions SET note = ? WHERE id = ?', [String(ctx.fields.note || ''), id]);
       for (const [key, value] of Object.entries(ctx.fields)) {
         const m = /^s_(\d+)$/.exec(key);
         if (!m) continue;
+        const memberId = Number(m[1]);
         const status = ['present', 'late', 'absent'].includes(value) ? value : 'present';
         run(
           `INSERT INTO attendance (session_id, member_id, status) VALUES (?, ?, ?)
            ON CONFLICT(session_id, member_id) DO UPDATE SET status = excluded.status`,
-          [id, Number(m[1]), status],
+          [id, memberId, status],
         );
+
+        // 出席・遅刻ならスタンプを 1 個押す。欠席に変えたら同じ稽古のスタンプを取り消す。
+        if (!autoStamp) continue;
+        if (status === 'absent') {
+          voidStampForSession(memberId, id, admin.id);
+        } else {
+          const result = grantStamp({
+            memberId,
+            sessionId: id,
+            reason: '稽古出席',
+            grantedBy: admin.id,
+            grantedOn: session.held_on,
+          });
+          if (result.created) stamped += 1;
+        }
       }
     });
-    redirect(ctx.res, `/attendance/${id}?msg=${encodeURIComponent('出欠を保存しました')}`);
+    const msg = autoStamp ? `出欠を保存し、${stamped} 名にスタンプを押しました` : '出欠を保存しました';
+    redirect(ctx.res, `/attendance/${id}?msg=${encodeURIComponent(msg)}`);
   });
 }

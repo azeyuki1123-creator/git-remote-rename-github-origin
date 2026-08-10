@@ -74,11 +74,15 @@ export async function parseBody(req) {
     return parseMultipart(raw, boundary[1] || boundary[2].trim());
   }
   const raw = await collectBody(req, 2 * 1024 * 1024);
+  // JSON（Webhook など）は署名検証のために生のまま渡す
+  if (type.startsWith('application/json')) {
+    return { fields: {}, files: {}, raw: raw.toString('utf8') };
+  }
   const fields = {};
   for (const [key, value] of new URLSearchParams(raw.toString('utf8'))) {
     addField(fields, key, value);
   }
-  return { fields, files: {} };
+  return { fields, files: {}, raw: raw.toString('utf8') };
 }
 
 /** 同名フィールド（チェックボックスなど）は配列にまとめる */

@@ -85,19 +85,25 @@ const SKILLS = {
   ],
 };
 
+// 名西支部は LINE 公式アカウントを持てないため、連絡はメールのみになる設定。
+const BRANCHES = [
+  ['本部', 1, 30, 500, 6, 'stamp', 1, 1, 'スタンプ 30 個で審査。2 枚目以降は 1 枚ごとに月謝 500 円引き。'],
+  ['名西支部', 0, 30, 500, 6, 'stamp', 1, 0, 'LINE 連携なし。連絡はメールのみ。'],
+];
+
 const MEMBERS = [
-  ['田中 拓海', 'たなか たくみ', '2011-05-02', '黄帯', 900, 'takumi@example.com', '田中 良子', 'premium'],
-  ['佐藤 美咲', 'さとう みさき', '2013-08-19', '青帯', 620, 'misaki@example.com', '佐藤 健一', 'standard'],
-  ['鈴木 蓮', 'すずき れん', '2010-01-30', '緑帯', 1300, 'ren@example.com', '鈴木 由美', 'premium'],
-  ['高橋 陽菜', 'たかはし ひな', '2015-03-11', '白帯', 120, 'hina@example.com', '高橋 誠', 'standard'],
-  ['伊藤 大輔', 'いとう だいすけ', '1996-11-07', '茶帯', 2400, 'daisuke@example.com', '', 'premium'],
-  ['渡辺 さくら', 'わたなべ さくら', '2012-06-24', 'オレンジ帯', 300, 'sakura@example.com', '渡辺 智子', 'standard'],
-  ['山本 颯', 'やまもと そう', '2014-09-15', '白帯', 90, 'sou@example.com', '山本 直人', 'standard'],
-  ['中村 結衣', 'なかむら ゆい', '2009-02-28', '紫帯', 1700, 'yui@example.com', '', 'premium'],
-  ['小林 悠真', 'こばやし ゆうま', '2013-12-03', '青帯', 700, 'yuma@example.com', '小林 千夏', 'standard'],
-  ['加藤 莉子', 'かとう りこ', '2016-07-21', '白帯', 45, 'riko@example.com', '加藤 拓也', 'standard'],
-  ['吉田 健吾', 'よしだ けんご', '1988-04-16', '黒帯（初段）', 3600, 'kengo@example.com', '', 'premium'],
-  ['山田 陽翔', 'やまだ はると', '2012-10-09', '黄帯', 850, 'haruto@example.com', '山田 洋介', 'standard'],
+  ['田中 拓海', 'たなか たくみ', '2011-05-02', '黄帯', 900, 'takumi@example.com', '田中 良子', 'premium', '本部'],
+  ['佐藤 美咲', 'さとう みさき', '2013-08-19', '青帯', 620, 'misaki@example.com', '佐藤 健一', 'standard', '本部'],
+  ['鈴木 蓮', 'すずき れん', '2010-01-30', '緑帯', 1300, 'ren@example.com', '鈴木 由美', 'premium', '本部'],
+  ['高橋 陽菜', 'たかはし ひな', '2015-03-11', '白帯', 120, 'hina@example.com', '高橋 誠', 'standard', '本部'],
+  ['伊藤 大輔', 'いとう だいすけ', '1996-11-07', '茶帯', 2400, 'daisuke@example.com', '', 'premium', '本部'],
+  ['渡辺 さくら', 'わたなべ さくら', '2012-06-24', 'オレンジ帯', 300, 'sakura@example.com', '渡辺 智子', 'standard', '本部'],
+  ['山本 颯', 'やまもと そう', '2014-09-15', '白帯', 90, 'sou@example.com', '山本 直人', 'standard', '本部'],
+  ['中村 結衣', 'なかむら ゆい', '2009-02-28', '紫帯', 1700, 'yui@example.com', '', 'premium', '本部'],
+  ['小林 悠真', 'こばやし ゆうま', '2013-12-03', '青帯', 700, 'yuma@example.com', '小林 千夏', 'standard', '名西支部'],
+  ['加藤 莉子', 'かとう りこ', '2016-07-21', '白帯', 45, 'riko@example.com', '加藤 拓也', 'standard', '名西支部'],
+  ['吉田 健吾', 'よしだ けんご', '1988-04-16', '黒帯（初段）', 3600, 'kengo@example.com', '', 'premium', '名西支部'],
+  ['山田 陽翔', 'やまだ はると', '2012-10-09', '黄帯', 850, 'haruto@example.com', '山田 洋介', 'standard', '名西支部'],
 ];
 
 const CONTENTS = [
@@ -143,8 +149,8 @@ const TEMPLATES = [
 function clear() {
   const tables = [
     'video_feedback', 'video_submissions', 'event_entries', 'events', 'exam_candidates', 'exams',
-    'assessments', 'skill_items', 'attendance', 'training_sessions', 'mail_messages', 'mail_templates',
-    'contents', 'members', 'auth_sessions', 'users', 'belts',
+    'assessments', 'skill_items', 'stamps', 'attendance', 'training_sessions', 'mail_messages',
+    'mail_templates', 'contents', 'members', 'auth_sessions', 'users', 'belts', 'branches',
   ];
   for (const t of tables) db.exec(`DELETE FROM ${t}`);
   // AUTOINCREMENT を使っていないため sqlite_sequence は存在しないことがある
@@ -153,6 +159,17 @@ function clear() {
 }
 
 function seedAll() {
+  // 支部
+  for (const [name, isMain, perCard, discount, maxCards, rule, reset, line, note] of BRANCHES) {
+    run(
+      `INSERT INTO branches (name, is_main, stamps_per_card, discount_per_card, discount_max_cards,
+                             exam_rule, reset_on_promotion, line_enabled, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [name, isMain, perCard, discount, maxCards, rule, reset, line, note],
+    );
+  }
+  const branchByName = new Map(all('SELECT * FROM branches').map((b) => [b.name, b]));
+
   // 帯
   for (const [name, short, order, color, minSessions, minMonths] of BELTS) {
     run(
@@ -181,8 +198,9 @@ function seedAll() {
 
   // 生徒
   const memberIds = [];
-  for (const [name, kana, birthday, beltName, daysAgo, email, guardian, plan] of MEMBERS) {
+  for (const [name, kana, birthday, beltName, daysAgo, email, guardian, plan, branchName] of MEMBERS) {
     const belt = beltByName.get(beltName);
+    const branch = branchByName.get(branchName);
     const joined = isoDaysAgo(daysAgo);
     const promoted = isoDaysAgo(Math.max(20, Math.floor(daysAgo * 0.25)));
     const userId = Number(
@@ -191,28 +209,39 @@ function seedAll() {
       ]).lastInsertRowid,
     );
     const info = run(
-      `INSERT INTO members (user_id, name, kana, birthday, belt_id, joined_on, last_promoted_on, phone, email,
-                            guardian_name, plan, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
-      [userId, name, kana, birthday, belt.id, joined, promoted, '090-0000-0000', email, guardian, plan],
+      `INSERT INTO members (user_id, branch_id, name, kana, birthday, belt_id, joined_on, last_promoted_on,
+                            phone, email, guardian_name, plan, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
+      [userId, branch.id, name, kana, birthday, belt.id, joined, promoted, '090-0000-0000', email, guardian, plan],
     );
     memberIds.push(Number(info.lastInsertRowid));
   }
 
-  // 稽古と出欠（過去 16 週、週 2 回）
-  for (let week = 15; week >= 0; week -= 1) {
+  // 稽古と出欠（過去 40 週、週 2 回）。出席・遅刻には指導者がスタンプを押した記録も残す。
+  for (let week = 39; week >= 0; week -= 1) {
     for (const [offset, title] of [[3, '通常稽古（水）'], [0, '通常稽古（土）']]) {
       const held = isoDaysAgo(week * 7 + offset);
-      const sessionId = Number(
-        run('INSERT INTO training_sessions (held_on, title, place) VALUES (?, ?, ?)', [held, title, '本部道場'])
-          .lastInsertRowid,
-      );
-      for (const memberId of memberIds) {
-        const r = rand();
-        const status = r < 0.72 ? 'present' : r < 0.82 ? 'late' : 'absent';
-        run('INSERT INTO attendance (session_id, member_id, status) VALUES (?, ?, ?)', [
-          sessionId, memberId, status,
-        ]);
+      for (const branch of branchByName.values()) {
+        const sessionId = Number(
+          run('INSERT INTO training_sessions (held_on, title, place, branch_id) VALUES (?, ?, ?, ?)', [
+            held, title, `${branch.name}道場`, branch.id,
+          ]).lastInsertRowid,
+        );
+        const targets = all('SELECT id FROM members WHERE branch_id = ?', [branch.id]).map((m) => m.id);
+        for (const memberId of targets) {
+          const r = rand();
+          const status = r < 0.72 ? 'present' : r < 0.82 ? 'late' : 'absent';
+          run('INSERT INTO attendance (session_id, member_id, status) VALUES (?, ?, ?)', [
+            sessionId, memberId, status,
+          ]);
+          if (status !== 'absent') {
+            run(
+              `INSERT INTO stamps (member_id, branch_id, session_id, granted_on, reason, granted_by)
+               VALUES (?, ?, ?, ?, '稽古出席', ?)`,
+              [memberId, branch.id, sessionId, held, adminId],
+            );
+          }
+        }
       }
     }
   }

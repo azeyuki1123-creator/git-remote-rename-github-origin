@@ -9,12 +9,14 @@ const dataDir = mkdtempSync(join(tmpdir(), 'dojo-test-'));
 process.env.DATA_DIR = dataDir;
 process.env.DB_PATH = join(dataDir, 'test.db');
 
-const { get } = await import('../src/db.js');
+const { get, all, run } = await import('../src/db.js');
 await import('../scripts/seed.js');
 const { createServer } = await import('../src/server.js');
 const { parseMultipart } = await import('../src/http.js');
 const { renderTemplate } = await import('../src/mail.js');
 const { examReadiness, canViewContent, monthsSince } = await import('../src/domain.js');
+const { stampSummary, grantStamp, voidStamp, branchById } = await import('../src/stamps.js');
+const { resolveChannel, verifySignature, issueLinkCode, linkByCode } = await import('../src/line.js');
 
 let server;
 let base;
@@ -192,6 +194,237 @@ describe('動画の提出とファイル配信', () => {
   test('ファイルも URL も無い提出は 400', async () => {
     const owner = await loginAs('takumi@example.com');
     assert.equal((await post('/videos', owner, { title: '空の提出' })).status, 400);
+  });
+});
+
+describe('スタンプカード', () => {
+  /** テスト用に、スタンプを 1 個も持たない生徒を作る */
+  function freshMember(branchId) {
+    const belt = get('SELECT id FROM belts ORDER BY rank_order LIMIT 1');
+    const info = run(
+      `INSERT INTO members (name, kana, belt_id, joined_on, last_promoted_on, branch_id, email, status)
+       VALUES ('検証 太郎', 'けんしょう たろう', ?, '2020-01-01', '2020-01-01', ?, 'kensho@example.com', 'active')`,
+      [belt.id, branchId],
+    );
+    return get('SELECT * FROM members WHERE id = ?', [Number(info.lastInsertRowid)]);
+  }
+
+  test('生徒は自分でスタンプを押せない（指導者専用の操作）', async () => {
+    const cookie = await loginAs('takumi@example.com');
+    assert.equal((await req('/stamps', cookie)).status, 403);
+    assert.equal((await post('/stamps/grant', cookie, { member_ids: '1' })).status, 403);
+    assert.equal((await post('/stamps/1/void', cookie, {})).status, 403);
+    assert.equal((await req('/branches', cookie)).status, 403);
+  });
+
+  test('マイページに押印ボタンが出ない', async () => {
+    const cookie = await loginAs('takumi@example.com');
+    const body = await (await req('/', cookie)).text();
+    assert.ok(!body.includes('/stamps/grant'), '押印フォームが含まれていないこと');
+    assert.ok(body.includes('指導者が押します'), '押せないことが明記されていること');
+  });
+
+  test('規定数たまると審査を受けられ、それ以上は台紙が進まない', () => {
+    const branch = get('SELECT * FROM branches ORDER BY is_main DESC LIMIT 1');
+    const member = freshMember(branch.id);
+    const admin = get("SELECT id FROM users WHERE role = 'admin' LIMIT 1");
+
+    assert.equal(stampSummary(member).examEligible, false);
+    for (let i = 0; i < branch.stamps_per_card - 1; i += 1) {
+      grantStamp({ memberId: member.id, reason: '稽古出席', grantedBy: admin.id, grantedOn: '2024-01-01' });
+    }
+    let summary = stampSummary(get('SELECT * FROM members WHERE id = ?', [member.id]));
+    assert.equal(summary.remaining, 1, 'あと 1 個');
+    assert.equal(summary.examEligible, false);
+
+    grantStamp({ memberId: member.id, reason: '稽古出席', grantedBy: admin.id, grantedOn: '2024-01-01' });
+    summary = stampSummary(get('SELECT * FROM members WHERE id = ?', [member.id]));
+    assert.equal(summary.examEligible, true, '規定数で受験資格');
+    assert.equal(examReadiness(get('SELECT * FROM members WHERE id = ?', [member.id])).ready, true);
+
+    // 超過分で台紙表示が 0 に巻き戻らないこと
+    grantStamp({ memberId: member.id, reason: '大会参加', grantedBy: admin.id, grantedOn: '2024-01-02' });
+    summary = stampSummary(get('SELECT * FROM members WHERE id = ?', [member.id]));
+    assert.equal(summary.progress, branch.stamps_per_card);
+  });
+
+  test('2 枚目以降の台紙で割引が段階的に増える', () => {
+    const branch = get('SELECT * FROM branches ORDER BY is_main DESC LIMIT 1');
+    const member = freshMember(branch.id);
+    const admin = get("SELECT id FROM users WHERE role = 'admin' LIMIT 1");
+    const per = branch.stamps_per_card;
+
+    const stampMany = (n) => {
+      for (let i = 0; i < n; i += 1) {
+        grantStamp({ memberId: member.id, reason: '稽古出席', grantedBy: admin.id, grantedOn: '2024-01-01' });
+      }
+      return stampSummary(get('SELECT * FROM members WHERE id = ?', [member.id]));
+    };
+
+    let summary = stampMany(per); // 1 枚目 = 審査資格のみ、割引なし
+    assert.equal(summary.completedCards, 1);
+    assert.equal(summary.discountCards, 0);
+    assert.equal(summary.discountAmount, 0);
+
+    summary = stampMany(per); // 2 枚目 = 割引 1 段階
+    assert.equal(summary.discountCards, 1);
+    assert.equal(summary.discountAmount, branch.discount_per_card);
+
+    summary = stampMany(per); // 3 枚目 = 割引 2 段階
+    assert.equal(summary.discountCards, 2);
+    assert.equal(summary.discountAmount, branch.discount_per_card * 2);
+  });
+
+  test('取り消したスタンプは数に入らず、誰が取り消したか残る', () => {
+    const branch = get('SELECT * FROM branches ORDER BY is_main DESC LIMIT 1');
+    const member = freshMember(branch.id);
+    const admin = get("SELECT id FROM users WHERE role = 'admin' LIMIT 1");
+
+    const { id } = grantStamp({ memberId: member.id, reason: '稽古出席', grantedBy: admin.id });
+    assert.equal(stampSummary(member).earned, 1);
+
+    voidStamp(id, admin.id, '誤って押した');
+    assert.equal(stampSummary(member).earned, 0);
+    const row = get('SELECT * FROM stamps WHERE id = ?', [id]);
+    assert.equal(row.status, 'void');
+    assert.equal(row.voided_by, admin.id);
+    assert.equal(row.void_reason, '誤って押した');
+  });
+
+  test('同じ稽古で二重に押されない', () => {
+    const branch = get('SELECT * FROM branches ORDER BY is_main DESC LIMIT 1');
+    const member = freshMember(branch.id);
+    const admin = get("SELECT id FROM users WHERE role = 'admin' LIMIT 1");
+    const session = get('SELECT * FROM training_sessions ORDER BY id LIMIT 1');
+
+    const first = grantStamp({ memberId: member.id, sessionId: session.id, grantedBy: admin.id });
+    const second = grantStamp({ memberId: member.id, sessionId: session.id, grantedBy: admin.id });
+    assert.equal(first.created, true);
+    assert.equal(second.created, false, '2 回目は増えないこと');
+    assert.equal(stampSummary(member).earned, 1);
+  });
+
+  test('押印者を指定しないと押せない', () => {
+    const branch = get('SELECT * FROM branches ORDER BY is_main DESC LIMIT 1');
+    const member = freshMember(branch.id);
+    assert.throws(() => grantStamp({ memberId: member.id, grantedBy: null }), /押印者/);
+  });
+
+  test('出欠を保存すると出席者にスタンプが押され、欠席に直すと取り消される', async () => {
+    const cookie = await loginAs('sensei@dojo.test');
+    const session = get('SELECT * FROM training_sessions ORDER BY held_on DESC LIMIT 1');
+    const member = get('SELECT * FROM members WHERE branch_id = ? ORDER BY id LIMIT 1', [session.branch_id]);
+
+    await post(`/attendance/${session.id}`, cookie, { [`s_${member.id}`]: 'present', auto_stamp: '1' });
+    let stamp = get('SELECT * FROM stamps WHERE member_id = ? AND session_id = ?', [member.id, session.id]);
+    assert.equal(stamp.status, 'active');
+    assert.ok(stamp.granted_by, '押した指導者が記録されること');
+
+    await post(`/attendance/${session.id}`, cookie, { [`s_${member.id}`]: 'absent', auto_stamp: '1' });
+    stamp = get('SELECT * FROM stamps WHERE member_id = ? AND session_id = ?', [member.id, session.id]);
+    assert.equal(stamp.status, 'void');
+  });
+
+  test('支部ごとにスタンプ必要数を変えられる', async () => {
+    const cookie = await loginAs('sensei@dojo.test');
+    const branch = get('SELECT * FROM branches ORDER BY is_main DESC LIMIT 1');
+    await post(`/branches/${branch.id}`, cookie, {
+      name: branch.name,
+      stamps_per_card: '10',
+      discount_per_card: '800',
+      discount_max_cards: '6',
+      exam_rule: 'stamp',
+      reset_on_promotion: '1',
+      line_enabled: String(branch.line_enabled),
+    });
+    assert.equal(branchById(branch.id).stamps_per_card, 10);
+
+    const member = freshMember(branch.id);
+    const admin = get("SELECT id FROM users WHERE role = 'admin' LIMIT 1");
+    for (let i = 0; i < 10; i += 1) {
+      grantStamp({ memberId: member.id, grantedBy: admin.id, grantedOn: '2024-01-01' });
+    }
+    assert.equal(stampSummary(member).examEligible, true, '10 個で受験資格になること');
+
+    // 後続のテストに影響しないよう元に戻す
+    await post(`/branches/${branch.id}`, cookie, {
+      name: branch.name,
+      stamps_per_card: String(branch.stamps_per_card),
+      discount_per_card: String(branch.discount_per_card),
+      discount_max_cards: String(branch.discount_max_cards),
+      exam_rule: branch.exam_rule,
+      reset_on_promotion: String(branch.reset_on_promotion),
+      line_enabled: String(branch.line_enabled),
+    });
+  });
+});
+
+describe('LINE 連携', () => {
+  const nanseiBranch = () => get("SELECT * FROM branches WHERE name = '名西支部'");
+
+  test('LINE を使わない支部の生徒はメールに振り分けられる', () => {
+    const branch = nanseiBranch();
+    assert.equal(branch.line_enabled, 0, '名西支部は LINE 連携なしの設定');
+    const member = get('SELECT * FROM members WHERE branch_id = ? AND email <> \'\' LIMIT 1', [branch.id]);
+    // 連携済みに見える状態でも、支部が無効ならメールになる
+    run("UPDATE members SET line_user_id = 'U-dummy', notify_channel = 'line' WHERE id = ?", [member.id]);
+    const target = resolveChannel(get('SELECT * FROM members WHERE id = ?', [member.id]));
+    assert.equal(target.channel, 'email');
+    run("UPDATE members SET line_user_id = '', notify_channel = 'auto' WHERE id = ?", [member.id]);
+  });
+
+  test('連携コードを送ると生徒に LINE ID が紐づき、有効な支部では LINE が選ばれる', () => {
+    const branch = get("SELECT * FROM branches WHERE is_main = 1");
+    run("UPDATE branches SET line_enabled = 1, line_token = 'T', line_secret = 'S' WHERE id = ?", [branch.id]);
+    const member = get('SELECT * FROM members WHERE branch_id = ? LIMIT 1', [branch.id]);
+
+    const code = issueLinkCode(member.id);
+    assert.match(code, /^\d{6}$/);
+    const linked = linkByCode(code, 'U-abc');
+    assert.equal(linked.id, member.id);
+
+    const updated = get('SELECT * FROM members WHERE id = ?', [member.id]);
+    assert.equal(updated.line_user_id, 'U-abc');
+    assert.equal(updated.line_link_code, '', 'コードは使い捨て');
+    assert.equal(resolveChannel(updated).channel, 'line');
+
+    // 存在しないコードでは紐づかない
+    assert.equal(linkByCode('000000', 'U-other'), null);
+  });
+
+  test('Webhook は署名が一致しないと受け付けない', async () => {
+    const branch = get("SELECT * FROM branches WHERE is_main = 1");
+    run("UPDATE branches SET line_enabled = 1, line_token = 'T', line_secret = 'S' WHERE id = ?", [branch.id]);
+    const body = JSON.stringify({ events: [] });
+    const { createHmac } = await import('node:crypto');
+    const signature = createHmac('sha256', 'S').update(body).digest('base64');
+
+    assert.equal(verifySignature('S', body, signature), true);
+    assert.equal(verifySignature('S', body, 'wrong'), false);
+    assert.equal(verifySignature('', body, signature), false);
+
+    const bad = await fetch(`${base}/line/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Line-Signature': 'wrong' },
+      body,
+    });
+    assert.equal(bad.status, 401);
+
+    const good = await fetch(`${base}/line/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Line-Signature': signature },
+      body,
+    });
+    assert.equal(good.status, 200);
+  });
+
+  test('配信は生徒ごとに LINE とメールへ振り分けられる', async () => {
+    const cookie = await loginAs('sensei@dojo.test');
+    await post('/mail/compose', cookie, { segment: 'all', subject: '振り分け確認', body: '{{name}} 様' });
+    const rows = all("SELECT channel, COUNT(*) AS c FROM mail_messages WHERE subject = '振り分け確認' GROUP BY channel");
+    const channels = Object.fromEntries(rows.map((r) => [r.channel, r.c]));
+    assert.ok(channels.line >= 1, 'LINE 連携済みの生徒には LINE で積まれること');
+    assert.ok(channels.email >= 1, '未連携の生徒にはメールで積まれること');
   });
 });
 

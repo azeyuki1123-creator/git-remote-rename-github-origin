@@ -1,8 +1,8 @@
 import { all, get } from '../db.js';
 import { html, redirect, esc } from '../http.js';
 import { requireUser } from '../auth.js';
-import { page, stat, bar, beltTag } from '../views/layout.js';
-import { examCandidates, examReadiness, memberPoints, contentsFor, belts } from '../domain.js';
+import { page, stat, bar, beltTag, stampCard, yen } from '../views/layout.js';
+import { examCandidates, examReadiness, contentsFor, belts } from '../domain.js';
 import { mailStats } from '../mail.js';
 
 function adminDashboard(ctx) {
@@ -144,7 +144,6 @@ function memberDashboard(ctx) {
   }
 
   const readiness = examReadiness(member);
-  const points = memberPoints(member.id);
   const contents = contentsFor(ctx.user);
   const unlocked = contents.filter((c) => c.access.ok).length;
   const allBelts = belts();
@@ -159,18 +158,44 @@ function memberDashboard(ctx) {
 
   const upcoming = all("SELECT * FROM events WHERE starts_on >= date('now') ORDER BY starts_on LIMIT 3");
 
+  const stamps = readiness.stamps;
   const body = `
   <h1>${esc(member.name)} さんのマイページ</h1>
-  <p class="sub">現在の帯 ${esc(readiness.belt?.name ?? '')} ／ 入会日 ${esc(member.joined_on)}</p>
+  <p class="sub">現在の帯 ${esc(readiness.belt?.name ?? '')} ／ ${esc(stamps.branch?.name ?? '')} ／ 入会日 ${esc(
+    member.joined_on,
+  )}</p>
 
   <div class="grid cols-4">
-    ${stat(points.total.toLocaleString('ja-JP'), '道場ポイント')}
-    ${stat(points.attendance, '出席回数（通算）')}
+    ${stat(`${stamps.progress} / ${stamps.perCard}`, 'スタンプ（現在の台紙）')}
+    ${stat(stamps.earned, '累計スタンプ')}
     ${stat(`${unlocked} / ${contents.length}`, '解放したコンテンツ')}
-    ${stat(readiness.ready ? '対象' : '準備中', '次回審査')}
+    ${stat(stamps.discountCards ? yen(stamps.discountAmount) : 'なし', '月謝の割引')}
   </div>
 
   <div class="card">
+    <h2 style="margin-top:0">スタンプカード</h2>
+    ${stampCard(stamps)}
+    <p style="margin:.4rem 0 0">
+      ${
+        stamps.examEligible
+          ? '<span class="badge ok">スタンプがたまりました</span> 審査を受けられます。'
+          : `審査を受けられるまであと <strong>${stamps.remaining}</strong> 個です。`
+      }
+      ${
+        stamps.discountCards
+          ? `<br>台紙 ${stamps.completedCards} 枚達成 → 月謝が <strong>${yen(stamps.discountAmount)}</strong> 割引になっています。`
+          : `<br>台紙が 2 枚目以降そろうと、1 枚ごとに月謝が ${yen(stamps.branch?.discount_per_card ?? 0)} 割引になります。`
+      }
+    </p>
+    <p class="muted" style="font-size:.85rem;margin-bottom:0">
+      スタンプは稽古のときに指導者が押します。アプリから自分で押すことはできません。
+    </p>
+  </div>
+
+  ${
+    // スタンプだけが条件の支部では上のカードと同じ内容になるので出さない
+    readiness.checks.length > 1
+      ? `<div class="card">
     <h2 style="margin-top:0">${esc(readiness.nextBelt?.name ?? '次の帯')}への道</h2>
     ${bar(readiness.progress)}
     <div class="table-wrap" style="margin-top:.8rem"><table>
@@ -188,7 +213,12 @@ function memberDashboard(ctx) {
         ? '<p style="margin-bottom:0"><span class="badge ok">次回審査の対象者です</span> 指導者からの案内をお待ちください。</p>'
         : ''
     }
-  </div>
+  </div>`
+      : readiness.ready
+        ? `<div class="card"><span class="badge ok">次回審査の対象者です</span>
+             ${esc(readiness.nextBelt?.name ?? '次の帯')}の審査に向けて、指導者からの案内をお待ちください。</div>`
+        : ''
+  }
 
   <div class="grid cols-2">
     <div class="card">
